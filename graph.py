@@ -7,6 +7,8 @@ from langgraph.graph import StateGraph, END
 from huggingface_hub import InferenceClient
 from langsmith.run_helpers import traceable
 from langchain_groq import ChatGroq
+from langchain.memory import ConversationBufferMemory
+from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 
 
 #from custom_llm import HuggingFaceInferenceClientLLM
@@ -43,6 +45,21 @@ class GroceryState(TypedDict):
     budget_check_result: str
     final_shopping_list: str
     budget: float
+    chat_history: list[BaseMessage]
+
+# Wrap planner in a callable function for LangGraph node
+def plan_execution(inputs: GroceryState) -> dict:
+    planner_input = {"user_input": inputs["user_input"], "chat_history": inputs.get("chat_history", [])}
+    planner_output_dict = planner.invoke(planner_input)
+    return {"plan": planner_output_dict.get("plan", "")}
+
+def update_chat_history(inputs: GroceryState) -> dict:
+    current_history = inputs.get("chat_history", [])
+    user_message = HumanMessage(content=inputs["user_input"])
+    ai_message = AIMessage(content=inputs["final_shopping_list"])
+
+    new_history = current_history + [user_message, ai_message]
+    return {"chat_history": new_history}
 
 # Wrap recipe_agent in a callable function for LangGraph node
 def recipe(inputs: GroceryState) -> dict:
@@ -74,17 +91,19 @@ def finalize_list(inputs: GroceryState) -> dict:
 def create_graph():
     workflow = StateGraph(state_schema=GroceryState)
 
-    workflow.add_node("planner", planner)
+    workflow.add_node("planner", plan_execution)
     workflow.add_node("recipe", recipe)
     workflow.add_node("product_finder", find_products)
     workflow.add_node("budgeting", check_budget)
     workflow.add_node("finalizer", finalize_list)
+    workflow.add_node("update_history", update_chat_history)
 
     workflow.set_entry_point("planner")
     workflow.add_edge("planner", "recipe")
     workflow.add_edge("recipe", "product_finder")
     workflow.add_edge("product_finder", "budgeting")
     workflow.add_edge("budgeting", "finalizer")
-    workflow.add_edge("finalizer", END)
+    workflow.add_edge("finalizer", "update_history")
+    workflow.add_edge("update_history", END)
 
     return workflow.compile()
